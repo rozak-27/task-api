@@ -1,7 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-app = FastAPI()
+app = FastAPI(
+    title="Task API",
+    version="1.0",
+    description="A simple CRUD API for managing tasks."
+)
 
 
 # In-memory task data
@@ -33,7 +37,10 @@ class TaskUpdate(BaseModel):
     done: bool | None = None
 
 
-@app.get("/")
+@app.get(
+    "/",
+    description="Get API information and available endpoints."
+)
 def root():
     return {
         "name": "Task API",
@@ -42,19 +49,28 @@ def root():
     }
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    description="Check whether the API is running."
+)
 def health():
     return {
         "status": "ok"
     }
 
 
-@app.get("/tasks")
+@app.get(
+    "/tasks",
+    description="Get all tasks."
+)
 def get_tasks():
     return tasks
 
 
-@app.get("/tasks/{task_id}")
+@app.get(
+    "/tasks/{task_id}",
+    description="Get a task by its ID."
+)
 def get_task(task_id: int):
     for task in tasks:
         if task["id"] == task_id:
@@ -66,7 +82,11 @@ def get_task(task_id: int):
     )
 
 
-@app.post("/tasks", status_code=201)
+@app.post(
+    "/tasks",
+    status_code=201,
+    description="Create a new task."
+)
 def create_task(task: TaskCreate):
     title = task.title.strip()
 
@@ -89,7 +109,10 @@ def create_task(task: TaskCreate):
     return new_task
 
 
-@app.put("/tasks/{task_id}")
+@app.put(
+    "/tasks/{task_id}",
+    description="Update an existing task."
+)
 def update_task(task_id: int, task_update: TaskUpdate):
     for task in tasks:
         if task["id"] == task_id:
@@ -116,7 +139,11 @@ def update_task(task_id: int, task_update: TaskUpdate):
     )
 
 
-@app.delete("/tasks/{task_id}", status_code=204)
+@app.delete(
+    "/tasks/{task_id}",
+    status_code=204,
+    description="Delete a task."
+)
 def delete_task(task_id: int):
     for index, task in enumerate(tasks):
         if task["id"] == task_id:
