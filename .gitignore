@@ -1,5 +1,27 @@
-__pycache__/
-*.pyc
-.venv/
-venv/
-.env
+# Task API
+
+A simple CRUD API for managing a to-do list using Python and FastAPI.
+
+## Features
+
+- Create tasks
+- Read all tasks
+- Read a task by ID
+- Update tasks
+- Delete tasks
+- Input validation
+- Swagger UI documentation
+- In-memory data storage
+
+## Requirements
+
+- Python 3.10+
+- FastAPI
+- Uvicorn
+
+## Installation & Run
+
+Install the dependencies:
+
+```bash
+pip install -r requirements.txt
