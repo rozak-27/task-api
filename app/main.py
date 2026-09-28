@@ -166,28 +166,68 @@ def create_task(task: TaskCreate):
     description="Update an existing task."
 )
 def update_task(task_id: int, task_update: TaskUpdate):
-    for task in tasks:
-        if task["id"] == task_id:
-            if task_update.title is not None:
-                title = task_update.title.strip()
+    connection = get_connection()
+    connection.row_factory = sqlite3.Row
+    cursor = connection.cursor()
 
-                if not title:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Title cannot be empty"
-                    )
-
-                task["title"] = title
-
-            if task_update.done is not None:
-                task["done"] = task_update.done
-
-            return task
-
-    raise HTTPException(
-        status_code=404,
-        detail=f"Task {task_id} not found"
+    # Check whether the task exists
+    cursor.execute(
+        "SELECT * FROM tasks WHERE id = ?",
+        (task_id,)
     )
+
+    existing_task = cursor.fetchone()
+
+    if existing_task is None:
+        connection.close()
+
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Task not found"}
+        )
+
+    # Keep the existing values if they are not provided
+    current_title = existing_task["title"]
+    current_done = existing_task["done"]
+
+    new_title = current_title
+    new_done = current_done
+
+    if task_update.title is not None:
+        new_title = task_update.title.strip()
+
+        if not new_title:
+            connection.close()
+
+            raise HTTPException(
+                status_code=400,
+                detail="Title cannot be empty"
+            )
+
+    if task_update.done is not None:
+        new_done = int(task_update.done)
+
+    cursor.execute(
+        """
+        UPDATE tasks
+        SET title = ?, done = ?
+        WHERE id = ?
+        """,
+        (new_title, new_done, task_id)
+    )
+
+    connection.commit()
+
+    cursor.execute(
+        "SELECT * FROM tasks WHERE id = ?",
+        (task_id,)
+    )
+
+    updated_task = cursor.fetchone()
+
+    connection.close()
+
+    return dict(updated_task)
 
 
 @app.delete(
@@ -196,12 +236,31 @@ def update_task(task_id: int, task_update: TaskUpdate):
     description="Delete a task."
 )
 def delete_task(task_id: int):
-    for index, task in enumerate(tasks):
-        if task["id"] == task_id:
-            tasks.pop(index)
-            return
+    connection = get_connection()
+    cursor = connection.cursor()
 
-    raise HTTPException(
-        status_code=404,
-        detail=f"Task {task_id} not found"
+    # Check whether the task exists
+    cursor.execute(
+        "SELECT id FROM tasks WHERE id = ?",
+        (task_id,)
     )
+
+    task = cursor.fetchone()
+
+    if task is None:
+        connection.close()
+
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Task not found"}
+        )
+
+    cursor.execute(
+        "DELETE FROM tasks WHERE id = ?",
+        (task_id,)
+    )
+
+    connection.commit()
+    connection.close()
+
+    return None
