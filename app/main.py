@@ -4,13 +4,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-
 app = FastAPI(
     title="Task API",
     version="1.0",
     description="A simple CRUD API for managing tasks."
 )
-
 
 DATABASE = "tasks.db"
 
@@ -51,28 +49,6 @@ def init_db():
 init_db()
 
 
-# Temporary in-memory task data.
-# This will be removed in Stage 2-3 after all CRUD operations
-# are moved to SQLite.
-tasks = [
-    {
-        "id": 1,
-        "title": "Learn FastAPI",
-        "done": False
-    },
-    {
-        "id": 2,
-        "title": "Build CRUD API",
-        "done": False
-    },
-    {
-        "id": 3,
-        "title": "Test API with Swagger",
-        "done": True
-    }
-]
-
-
 class TaskCreate(BaseModel):
     title: str
 
@@ -99,9 +75,7 @@ def root():
     description="Check whether the API is running."
 )
 def health():
-    return {
-        "status": "ok"
-    }
+    return {"status": "ok"}
 
 
 @app.get(
@@ -162,17 +136,29 @@ def create_task(task: TaskCreate):
             detail="Title cannot be empty"
         )
 
-    new_id = max(task["id"] for task in tasks) + 1
+    connection = get_connection()
+    connection.row_factory = sqlite3.Row
+    cursor = connection.cursor()
 
-    new_task = {
-        "id": new_id,
-        "title": title,
-        "done": False
-    }
+    cursor.execute(
+        "INSERT INTO tasks (title, done) VALUES (?, ?)",
+        (title, 0)
+    )
 
-    tasks.append(new_task)
+    new_id = cursor.lastrowid
 
-    return new_task
+    connection.commit()
+
+    cursor.execute(
+        "SELECT * FROM tasks WHERE id = ?",
+        (new_id,)
+    )
+
+    row = cursor.fetchone()
+
+    connection.close()
+
+    return dict(row)
 
 
 @app.put(
@@ -182,7 +168,6 @@ def create_task(task: TaskCreate):
 def update_task(task_id: int, task_update: TaskUpdate):
     for task in tasks:
         if task["id"] == task_id:
-
             if task_update.title is not None:
                 title = task_update.title.strip()
 
