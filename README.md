@@ -1,73 +1,60 @@
 # Task API
 
-A simple CRUD API for managing a to-do list using Python and FastAPI.
+A simple CRUD API built with FastAPI and SQLite.
 
-## Features
+## Why SQLite?
 
-- Create tasks
-- Read all tasks
-- Read a task by ID
-- Update tasks
-- Delete tasks
-- Input validation
-- Swagger UI documentation
-- In-memory data storage
+I use SQLite because it is simple, requires no separate database server,
+and stores the database in a single file. The data also persists when
+the API server is restarted.
 
-## Requirements
+## Database
 
-- Python 3.10+
-- FastAPI
-- Uvicorn
+The SQLite database is:
 
-## Installation & Run
+```text```
+tasks.db
 
-Install dependencies:
+The database file is automatically created when the application starts.
+The tasks table is also created automatically.
 
-```bash
-pip install -r requirements.txt
+The database contains three seed tasks when the table is empty.
 
-Run the API:
+tasks.db is ignored by Git because it is a local database file.
+
+Run the API
+
+Activate the virtual environment:
+
+.\.venv\Scripts\Activate.ps1
+
+Start the FastAPI server:
 
 uvicorn app.main:app --reload
 
-The API will run at:
-
-http://127.0.0.1:8000
-
-Swagger UI:
+Open Swagger UI:
 
 http://127.0.0.1:8000/docs
-Endpoints
+API Endpoints
 Method	Endpoint	Description
 GET	/	Get API information
 GET	/health	Check API health
 GET	/tasks	Get all tasks
 GET	/tasks/{task_id}	Get a task by ID
-POST	/tasks	Create a new task
+POST	/tasks	Create a task
 PUT	/tasks/{task_id}	Update a task
 DELETE	/tasks/{task_id}	Delete a task
-Status Codes
-Status Code	Description
-200	Successful request
-201	Task successfully created
-204	Task successfully deleted
-400	Invalid request body
-404	Task not found
-Example
+SQLite Example
 
-Create a new task:
+Example query:
 
-curl -i -X POST "http://127.0.0.1:8000/tasks" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"title\":\"Buy milk\"}"
-Swagger UI
+SELECT * FROM tasks WHERE done = 1;
 
-Swagger UI is available at:
+This query returns all completed tasks from the tasks table.
 
-http://127.0.0.1:8000/docs
+Database Browser
 
-Notes
+The SQLite database was explored using DB Browser for SQLite.
 
-This API uses in-memory storage. Tasks will be lost when the server is restarted.
 
-No database is used in this assignment.
+![SQLite Database Browser](sqlite-browser.png)
