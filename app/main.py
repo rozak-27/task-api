@@ -1,8 +1,16 @@
-import sqlite3
+import os
 
+import psycopg
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 
 app = FastAPI(
     title="Task API",
@@ -10,11 +18,9 @@ app = FastAPI(
     description="A simple CRUD API for managing tasks."
 )
 
-DATABASE = "tasks.db"
-
 
 def get_connection():
-    return sqlite3.connect(DATABASE)
+    return psycopg.connect(DATABASE_URL)
 
 
 def init_db():
@@ -23,9 +29,9 @@ def init_db():
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
-            done BOOLEAN NOT NULL DEFAULT 0
+            done BOOLEAN NOT NULL DEFAULT FALSE
         )
     """)
 
@@ -34,11 +40,11 @@ def init_db():
 
     if count == 0:
         cursor.executemany(
-            "INSERT INTO tasks (id, title, done) VALUES (?, ?, ?)",
+            "INSERT INTO tasks (title, done) VALUES (%s, %s)",
             [
-                (1, "Learn FastAPI", 0),
-                (2, "Build CRUD API", 0),
-                (3, "Test API with Swagger", 1)
+                ("Learn FastAPI", False),
+                ("Build CRUD API", False),
+                ("Test API with Swagger", True)
             ]
         )
 
@@ -84,15 +90,26 @@ def health():
 )
 def get_tasks():
     connection = get_connection()
-    connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
 
-    cursor.execute("SELECT * FROM tasks")
+    cursor.execute("""
+        SELECT id, title, done
+        FROM tasks
+        ORDER BY id
+    """)
+
     rows = cursor.fetchall()
 
     connection.close()
 
-    return [dict(row) for row in rows]
+    return [
+        {
+            "id": row[0],
+            "title": row[1],
+            "done": row[2]
+        }
+        for row in rows
+    ]
 
 
 @app.get(
@@ -101,11 +118,14 @@ def get_tasks():
 )
 def get_task(task_id: int):
     connection = get_connection()
-    connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
 
     cursor.execute(
-        "SELECT * FROM tasks WHERE id = ?",
+        """
+        SELECT id, title, done
+        FROM tasks
+        WHERE id = %s
+        """,
         (task_id,)
     )
 
@@ -119,7 +139,11 @@ def get_task(task_id: int):
             content={"error": "Task not found"}
         )
 
-    return dict(row)
+    return {
+        "id": row[0],
+        "title": row[1],
+        "done": row[2]
+    }
 
 
 @app.post(
@@ -137,28 +161,27 @@ def create_task(task: TaskCreate):
         )
 
     connection = get_connection()
-    connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
 
     cursor.execute(
-        "INSERT INTO tasks (title, done) VALUES (?, ?)",
-        (title, 0)
-    )
-
-    new_id = cursor.lastrowid
-
-    connection.commit()
-
-    cursor.execute(
-        "SELECT * FROM tasks WHERE id = ?",
-        (new_id,)
+        """
+        INSERT INTO tasks (title, done)
+        VALUES (%s, %s)
+        RETURNING id, title, done
+        """,
+        (title, False)
     )
 
     row = cursor.fetchone()
 
+    connection.commit()
     connection.close()
 
-    return dict(row)
+    return {
+        "id": row[0],
+        "title": row[1],
+        "done": row[2]
+    }
 
 
 @app.put(
@@ -167,12 +190,15 @@ def create_task(task: TaskCreate):
 )
 def update_task(task_id: int, task_update: TaskUpdate):
     connection = get_connection()
-    connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
 
     # Check whether the task exists
     cursor.execute(
-        "SELECT * FROM tasks WHERE id = ?",
+        """
+        SELECT id, title, done
+        FROM tasks
+        WHERE id = %s
+        """,
         (task_id,)
     )
 
@@ -186,9 +212,9 @@ def update_task(task_id: int, task_update: TaskUpdate):
             content={"error": "Task not found"}
         )
 
-    # Keep the existing values if they are not provided
-    current_title = existing_task["title"]
-    current_done = existing_task["done"]
+    # Keep existing values if they are not provided
+    current_title = existing_task[1]
+    current_done = existing_task[2]
 
     new_title = current_title
     new_done = current_done
@@ -205,29 +231,28 @@ def update_task(task_id: int, task_update: TaskUpdate):
             )
 
     if task_update.done is not None:
-        new_done = int(task_update.done)
+        new_done = task_update.done
 
     cursor.execute(
         """
         UPDATE tasks
-        SET title = ?, done = ?
-        WHERE id = ?
+        SET title = %s, done = %s
+        WHERE id = %s
+        RETURNING id, title, done
         """,
         (new_title, new_done, task_id)
     )
 
-    connection.commit()
-
-    cursor.execute(
-        "SELECT * FROM tasks WHERE id = ?",
-        (task_id,)
-    )
-
     updated_task = cursor.fetchone()
 
+    connection.commit()
     connection.close()
 
-    return dict(updated_task)
+    return {
+        "id": updated_task[0],
+        "title": updated_task[1],
+        "done": updated_task[2]
+    }
 
 
 @app.delete(
@@ -241,7 +266,11 @@ def delete_task(task_id: int):
 
     # Check whether the task exists
     cursor.execute(
-        "SELECT id FROM tasks WHERE id = ?",
+        """
+        SELECT id
+        FROM tasks
+        WHERE id = %s
+        """,
         (task_id,)
     )
 
@@ -256,7 +285,10 @@ def delete_task(task_id: int):
         )
 
     cursor.execute(
-        "DELETE FROM tasks WHERE id = ?",
+        """
+        DELETE FROM tasks
+        WHERE id = %s
+        """,
         (task_id,)
     )
 
