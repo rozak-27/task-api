@@ -1,40 +1,75 @@
 # Task API
 
-A simple CRUD API built with FastAPI and SQLite.
+A simple CRUD API built with FastAPI and PostgreSQL.
 
-## Why SQLite?
+For this assignment, the API runs together with PostgreSQL using Docker Compose.
 
-I use SQLite because it is simple, requires no separate database server,
-and stores the database in a single file. The data also persists when
-the API server is restarted.
+## What This Project Does
 
-## Database
+This project provides a simple Task API with CRUD operations:
 
-The SQLite database is:
+- Create a task
+- Read all tasks
+- Read a task by ID
+- Update a task
+- Delete a task
 
-```text```
-tasks.db
+The database is PostgreSQL and runs inside a Docker container.
 
-The database file is automatically created when the application starts.
-The tasks table is also created automatically.
+## Run with Docker Compose
 
-The database contains three seed tasks when the table is empty.
+Make sure Docker Desktop is running.
 
-tasks.db is ignored by Git because it is a local database file.
+Create `.env` from `.env.example` if needed:
 
-Run the API
+```powershell
+Copy-Item .env.example .env
 
-Activate the virtual environment:
+Start the API and PostgreSQL with one command:
 
-.\.venv\Scripts\Activate.ps1
+docker compose up
 
-Start the FastAPI server:
+The API will be available at:
 
-uvicorn app.main:app --reload
+http://localhost:3000
 
-Open Swagger UI:
+Swagger UI:
 
-http://127.0.0.1:8000/docs
+http://localhost:3000/docs
+
+To stop the stack:
+
+docker compose down
+
+The PostgreSQL data is stored in a Docker volume named taskdata, so the data persists after the containers are stopped.
+
+Environment Variables
+
+The database connection is configured using DATABASE_URL.
+
+Example:
+
+DATABASE_URL=postgres://postgres:dev@localhost:5433/tasks
+
+The .env file is ignored by Git.
+
+.env.example is included in the repository as a template.
+
+Database
+
+PostgreSQL runs in a Docker container using the official PostgreSQL 17 image.
+
+The database and tasks table are created automatically when the application starts.
+
+When the table is empty, the application creates three seed tasks:
+
+Learn FastAPI
+Build CRUD API
+Test API with Swagger
+
+The API connects to PostgreSQL using the Docker Compose service name:
+
+db:5432
 API Endpoints
 Method	Endpoint	Description
 GET	/	Get API information
@@ -44,17 +79,81 @@ GET	/tasks/{task_id}	Get a task by ID
 POST	/tasks	Create a task
 PUT	/tasks/{task_id}	Update a task
 DELETE	/tasks/{task_id}	Delete a task
-SQLite Example
+Example Request
 
-Example query:
+Create a task:
 
-SELECT * FROM tasks WHERE done = 1;
+$body = @{
+    title = "Test Docker Persistence"
+} | ConvertTo-Json
 
-This query returns all completed tasks from the tasks table.
+Invoke-RestMethod `
+    -Uri "http://localhost:3000/tasks" `
+    -Method Post `
+    -ContentType "application/json" `
+    -Body $body
 
-Database Browser
+Example response:
 
-The SQLite database was explored using DB Browser for SQLite.
+{
+  "id": 4,
+  "title": "Test Docker Persistence",
+  "done": false
+}
+Database Persistence
 
+The PostgreSQL database uses a Docker volume:
 
-![SQLite Database Browser](sqlite-browser.png)
+taskdata
+
+This allows task data to remain available after:
+
+docker compose down
+
+and starting the stack again with:
+
+docker compose up
+
+For example, task 4 was created before restarting the stack and was still available afterward.
+
+Database Check
+
+PostgreSQL can be accessed from the database container:
+
+docker compose exec db psql -U postgres -d tasks
+
+Inside psql, check the tables:
+
+\dt
+
+Check the task data:
+
+SELECT * FROM tasks;
+
+Exit with:
+
+\q
+Docker Stack
+
+The project contains two services:
+
+Docker Compose
+├── api
+│   └── FastAPI
+│
+└── db
+    └── PostgreSQL 17
+
+The API connects to PostgreSQL through the Compose service name db.
+
+Project Structure
+task-api/
+├── app/
+│   ├── __init__.py
+│   └── main.py
+├── Dockerfile
+├── compose.yaml
+├── .env.example
+├── .gitignore
+├── README.md
+└── requirements.txt
