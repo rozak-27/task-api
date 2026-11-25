@@ -1,6 +1,9 @@
 import os
+import time
+from collections import defaultdict
 
 import psycopg
+import uvicorn
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security
 from fastapi.exceptions import RequestValidationError
@@ -14,13 +17,20 @@ from app.supabase_client import supabase
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+PORT = int(os.getenv("PORT", "8000"))
+
+# Rate-limiting settings for POST /auth/login (brute-force protection)
+LOGIN_MAX_FAILED_ATTEMPTS = 5
+LOGIN_WINDOW_SECONDS = 60
+_failed_login_attempts: dict[str, list[float]] = defaultdict(list)
 
 app = FastAPI(
-    title="Task API",
+    title="Task & Auth API",
     version="1.0.0",
     description=(
-        "A secure API with Supabase Auth — sign up, log in, log out, "
-        "JWT verification via reusable dependency, and protected routes."
+        "A secure REST API built with FastAPI and Supabase Auth — featuring sign up, "
+        "log in (with brute-force rate limiting), token refresh, log out, reusable JWT "
+        "verification dependency, role-based 403 authorization, and Swagger Bearer auth."
     ),
 )
 
@@ -124,8 +134,54 @@ class AuthRequest(BaseModel):
     }
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str | None = None
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"refresh_token": "paste_your_refresh_token_here"}]
+        }
+    }
+
+
 # ==========================================
-# REUSABLE AUTH DEPENDENCY (GUARD)
+# RATE LIMITING HELPER (POST /auth/login)
+# ==========================================
+
+def get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def check_login_rate_limit(client_ip: str) -> None:
+    now = time.time()
+    recent = [
+        ts for ts in _failed_login_attempts[client_ip]
+        if now - ts < LOGIN_WINDOW_SECONDS
+    ]
+    _failed_login_attempts[client_ip] = recent
+    if len(recent) >= LOGIN_MAX_FAILED_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many failed login attempts. "
+                f"Please try again in {LOGIN_WINDOW_SECONDS} seconds."
+            ),
+            headers={"Retry-After": str(LOGIN_WINDOW_SECONDS)},
+        )
+
+
+def record_failed_login(client_ip: str) -> None:
+    _failed_login_attempts[client_ip].append(time.time())
+
+
+def clear_failed_logins(client_ip: str) -> None:
+    _failed_login_attempts.pop(client_ip, None)
+
+
+# ==========================================
+# REUSABLE AUTH & ROLE DEPENDENCIES (GUARDS)
 # ==========================================
 
 def extract_bearer_token(request: Request) -> str:
@@ -154,6 +210,19 @@ def get_current_user(
         raise
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
+
+
+def require_admin(current_user=Depends(get_current_user)):
+    app_meta = getattr(current_user, "app_metadata", None) or {}
+    user_meta = getattr(current_user, "user_metadata", None) or {}
+    role = app_meta.get("role") or user_meta.get("role")
+
+    if role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: admin privileges required",
+        )
+    return current_user
 
 
 # ==========================================
@@ -191,9 +260,12 @@ def signup(auth: AuthRequest | None = None):
     "/auth/login",
     status_code=200,
     tags=["Auth"],
-    summary="Authenticate and return a JWT",
+    summary="Authenticate and return a JWT (rate-limited)",
 )
-def login(auth: AuthRequest | None = None):
+def login(request: Request, auth: AuthRequest | None = None):
+    client_ip = get_client_ip(request)
+    check_login_rate_limit(client_ip)
+
     if auth is None:
         raise HTTPException(status_code=400, detail="Email and password are required")
 
@@ -208,8 +280,10 @@ def login(auth: AuthRequest | None = None):
             {"email": email, "password": password}
         )
         if response.session is None:
+            record_failed_login(client_ip)
             raise HTTPException(status_code=401, detail="Invalid login credentials")
 
+        clear_failed_logins(client_ip)
         return {
             "access_token": response.session.access_token,
             "refresh_token": response.session.refresh_token,
@@ -218,7 +292,34 @@ def login(auth: AuthRequest | None = None):
     except HTTPException:
         raise
     except Exception as exc:
+        record_failed_login(client_ip)
         raise HTTPException(status_code=401, detail="Invalid login credentials") from exc
+
+
+@app.post(
+    "/auth/refresh",
+    status_code=200,
+    tags=["Auth"],
+    summary="Exchange a refresh token for a fresh access token",
+)
+def refresh_access_token(body: RefreshRequest | None = None):
+    if body is None or not (body.refresh_token or "").strip():
+        raise HTTPException(status_code=400, detail="Refresh token is required")
+
+    token = body.refresh_token.strip()
+    try:
+        response = supabase.auth.refresh_session(token)
+        if response.session is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+        return {
+            "access_token": response.session.access_token,
+            "refresh_token": response.session.refresh_token,
+            "token_type": "bearer",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token") from exc
 
 
 @app.post(
@@ -250,6 +351,7 @@ def protected_profile(current_user=Depends(get_current_user)):
         "id": current_user.id,
         "email": current_user.email,
         "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "role": current_user.role,
     }
 
 
@@ -261,6 +363,18 @@ def protected_dashboard(current_user=Depends(get_current_user)):
     }
 
 
+@app.get(
+    "/protected/admin",
+    tags=["Protected"],
+    summary="Admin-only endpoint demonstrating 403 Forbidden vs 401 Unauthorized",
+)
+def protected_admin(admin_user=Depends(require_admin)):
+    return {
+        "message": f"Welcome Admin {admin_user.email}!",
+        "admin_id": admin_user.id,
+    }
+
+
 # ==========================================
 # GENERAL & TASK CRUD ENDPOINTS
 # ==========================================
@@ -268,9 +382,19 @@ def protected_dashboard(current_user=Depends(get_current_user)):
 @app.get("/", tags=["General"], summary="Get API overview")
 def root():
     return {
-        "name": "Task API",
+        "name": "Task & Auth API",
         "version": "1.0.0",
         "docs": "/docs",
+        "endpoints": [
+            "POST /auth/signup",
+            "POST /auth/login",
+            "POST /auth/refresh",
+            "POST /auth/logout",
+            "GET /public/info",
+            "GET /protected/profile",
+            "GET /protected/dashboard",
+            "GET /protected/admin",
+        ],
     }
 
 
@@ -363,3 +487,7 @@ def delete_task(task_id: int):
     connection.commit()
     connection.close()
     return Response(status_code=204)
+
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=PORT, reload=True)
