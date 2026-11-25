@@ -1,0 +1,26 @@
+{
+  "started_at": "2026-11-25T13:26:41Z",
+  "finished_at": "2026-11-25T13:26:45Z",
+  "duration_seconds": 3.225,
+  "catalogue_pages": 3,
+  "discovered_urls": 60,
+  "unique_urls": 60,
+  "pages_fetched": 0,
+  "cache_hits": 63,
+  "valid_records": 60,
+  "invalid_records": 0,
+  "failed_pages": 1,
+  "changed_since_last_run": {
+    "new": 0,
+    "changed": 0,
+    "unchanged": 60,
+    "gone": 0
+  },
+  "failures": [
+    {
+      "url": "https://books.toscrape.com/catalogue/deliberately-broken-book_99999/index.html",
+      "status_code": 404,
+      "reason": "HTTP 404 (not retried)"
+    }
+  ]
+}

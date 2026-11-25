@@ -1,3 +1,7 @@
+> **Repository Contents**
+> - **Assignment A4 (Auth · Login & Protect)**: FastAPI + Supabase JWT API in [`app/`](./app/) (documented below).
+> - **Assignment A9 (The Polite Scraper)**: Polite scraping pipeline + Pydantic validation + unit tests in [`scraper/`](./scraper/README.md).
+
 # Task & Auth API — Supabase JWT Authentication
 
 A secure REST API built with **FastAPI** and **Supabase Auth** (Identity Provider) implementing user registration, login, session refresh, logout, reusable JWT bearer-token verification, role-based authorization (`403 Forbidden`), login brute-force rate limiting (`429 Too Many Requests`), and interactive **Swagger UI** Bearer authentication.
