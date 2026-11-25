@@ -172,8 +172,9 @@ def login(auth: AuthRequest | None = None):
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid login credentials") from exc
 
+
 # ==========================================
-# PUBLIC & PROTECTED ENDPOINTS
+# REUSABLE AUTH DEPENDENCY (GUARD)
 # ==========================================
 
 def extract_bearer_token(request: Request) -> str:
@@ -188,28 +189,57 @@ def extract_bearer_token(request: Request) -> str:
     return parts[1].strip()
 
 
+def get_current_user(request: Request):
+    token = extract_bearer_token(request)
+    try:
+        user_response = supabase.auth.get_user(token)
+        if user_response is None or user_response.user is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return user_response.user
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
+
+
+@app.post(
+    "/auth/logout",
+    status_code=204,
+    tags=["Auth"],
+    summary="End the current user session",
+)
+def logout(current_user=Depends(get_current_user)):
+    try:
+        supabase.auth.sign_out()
+    except Exception:
+        pass
+    return Response(status_code=204)
+
+
+# ==========================================
+# PUBLIC & PROTECTED ENDPOINTS
+# ==========================================
+
 @app.get("/public/info", tags=["Public"], summary="Read public open data")
 def public_info():
     return {"message": "Welcome stranger! This info is public."}
 
 
 @app.get("/protected/profile", tags=["Protected"], summary="Read verified user profile")
-def protected_profile(request: Request):
-    token = extract_bearer_token(request)
-    try:
-        user_response = supabase.auth.get_user(token)
-        if user_response is None or user_response.user is None:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        user = user_response.user
-        return {
-            "id": user.id,
-            "email": user.email,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
+def protected_profile(current_user=Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+    }
+
+
+@app.get("/protected/dashboard", tags=["Protected"], summary="Read protected user dashboard")
+def protected_dashboard(current_user=Depends(get_current_user)):
+    return {
+        "message": f"Welcome to your dashboard, {current_user.email}!",
+        "user_id": current_user.id,
+    }
 
 # ==========================================
 # GENERAL & TASK CRUD ENDPOINTS
