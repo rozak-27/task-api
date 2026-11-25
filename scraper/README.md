@@ -125,3 +125,36 @@ This assignment needed **no headless browser** because Books to Scrape serves ev
 ## 6 · Scraping Ethics Note
 
 Good scraping starts with restraint: always use an official public API or data export when one exists instead of parsing HTML. Never bypass authentication walls, paywalls, rate limits (`429`), `403` blocks, or `robots.txt` restrictions, and never collect personal data or more pages/fields than your application genuinely needs.
+
+---
+
+## 7 · AI vs Me (Bonus Stage B — The AI Rematch)
+
+The quarantined AI-generated implementation is isolated in [`ai-version/main.py`](./ai-version/main.py), leaving [`src/main.py`](./src/main.py) completely untouched.
+
+### My Prompt (Written From Scratch)
+
+> **Initial Prompt (v1):**
+> *"Write a polite Python 3.10+ scraper using `requests`, `BeautifulSoup`, and `Pydantic` targeting `https://books.toscrape.com/catalogue/page-1.html`. Follow the `'next'` link across only the first 3 catalogue pages, resolve all relative links with `urljoin`, deduplicate canonical book URLs, and visit all 60 book detail pages. Send User-Agent `'FlyRankInternship-A9/1.0 (+https://github.com/rozak-27/task-api)'`, enforce a 10-second timeout and at least 500 ms delay between real HTTP requests, check for HTTP 200, and cache HTML files under `cache/` so reruns hit disk without network delays. Extract 8 raw fields (`title`, `product_url`, `price_text`, `availability_text`, `rating_text`, optional `description` as `None` when missing, `source_page`, `fetched_at`) plus numeric `price_gbp: float`. Validate every record with Pydantic before saving idempotently to `output/books.json` (keyed by `product_url` so reruns stay at 60 records); route invalid records to `output/errors.json` with a reason. Catch broken pages individually (retry once on timeout/5xx, never retry 404 or 403), test with one deliberate fake URL, and write `output/run-report.json` with start time, duration, pages fetched, cache hits, valid/invalid counts, and failed pages."*
+
+### Checkpoint Results: Hand-Built (`src/main.py`) vs AI (`ai-version/main.py`)
+
+| Checkpoint | Hand-Built (`src/main.py`) | AI v1 (First Attempt) | AI v2 (`ai-version/main.py` Rematch) |
+| :--- | :--- | :--- | :--- |
+| Collects all 60 unique books | Pass (`60`) | Pass (`60`, but `price_text` had `"Â£51.77"`) | Pass (`60`, clean `"£51.77"`) |
+| Rerun stays at 60 (idempotent) | Pass (`60` after rerun) | Pass (`60`, but overwrote `fetched_at`) | Pass (`60`, preserves `fetched_at`) |
+| Broken page (`404`) skipped & reported | Pass (`failed_pages: 1`, 0 retries on 404) | Pass (`failed_pages: 1`) | Pass (`failed_pages: 1`) |
+| Offline parser unit tests (`pytest`) | Pass (`6 passed`) | Not generated | Isolated script |
+
+### Diff Review — Three Engineering Questions
+
+1. **What did the AI do better — and do I understand that code?**
+   The AI wrapped HTTP state (`requests.Session()`, `last_call` timestamp, `fetched`, and `cache_hits` counters) inside a small `PoliteFetcher` class instead of module-level globals. Using `requests.Session()` reuses the underlying TCP/TLS connection via HTTP keep-alive across sequential requests, reducing handshake latency and eliminating `global _last_network_request_at`.
+2. **What did the AI get wrong or silently skip in v1?**
+   - **`ISO-8859-1` Mojibake (`"Â£51.77"`)**: Because `books.toscrape.com` sends `Content-Type: text/html` without `; charset=utf-8`, `resp.text` in `requests` defaults to `ISO-8859-1` per RFC 2616, corrupting `"£51.77"` into `"Â£51.77"` (whereas `resp.content.decode("utf-8")` decodes cleanly).
+   - **Provenance Overwrite on Cache Hits**: On cached reruns, v1 stamped `datetime.now(timezone.utc)` onto `fetched_at`, erasing when the HTML was actually fetched from the server.
+   - **Unscoped Selectors**: v1 queried `soup.select_one("p.price_color")` across the whole document instead of scoping inside `article.product_page > div.product_main` (which breaks on pages showing "Recently Viewed" or related book prices).
+3. **What did my initial prompt forget to say?**
+   My v1 prompt forgot to specify **UTF-8 byte decoding (`resp.content.decode("utf-8")`)**, **how `fetched_at` provenance should be preserved when reading from `cache/`**, and **scoping CSS selectors strictly to `article.product_page`**.
+4. **One Rematch (What Changed):**
+   Adding explicit requirements for UTF-8 byte decoding, scoping all detail selectors under `article.product_page`, and reading cached file `mtime` for `fetched_at` eliminated the `"Â£"` encoding bug and preserved true provenance on reruns in [`ai-version/main.py`](./ai-version/main.py).
