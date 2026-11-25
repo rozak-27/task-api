@@ -173,6 +173,32 @@ def login(auth: AuthRequest | None = None):
         raise HTTPException(status_code=401, detail="Invalid login credentials") from exc
 
 # ==========================================
+# PUBLIC & PROTECTED ENDPOINTS
+# ==========================================
+
+def extract_bearer_token(request: Request) -> str:
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Access token required")
+
+    parts = auth_header.split(" ")
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        raise HTTPException(status_code=401, detail="Access token required")
+
+    return parts[1].strip()
+
+
+@app.get("/public/info", tags=["Public"], summary="Read public open data")
+def public_info():
+    return {"message": "Welcome stranger! This info is public."}
+
+
+@app.get("/protected/profile", tags=["Protected"], summary="Read private profile data")
+def protected_profile(request: Request):
+    token = extract_bearer_token(request)
+    return {"message": "Token received", "token_preview": f"{token[:12]}..."}
+
+# ==========================================
 # GENERAL & TASK CRUD ENDPOINTS
 # ==========================================
 
