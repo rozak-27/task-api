@@ -1,7 +1,11 @@
-"""Stage 5 — Fault isolation per page, selective retry (never 404/403), and run-report.json."""
+"""The Polite Scraper — Complete Pipeline with Backoff Retry, Change Detection, CSV & HTML Dashboard."""
 
 import argparse
+import csv
+import hashlib
+import html as html_lib
 import json
+import random
 import re
 import sys
 import time
@@ -30,9 +34,20 @@ USER_AGENT = "FlyRankInternship-A9/1.0 (+https://github.com/rozak-27/task-api)"
 TIMEOUT_SECONDS = 10
 POLITE_DELAY_SECONDS = 0.52
 MAX_CATALOGUE_PAGES = 3
+MAX_RETRY_ATTEMPTS = 3
+BACKOFF_BASE_SECONDS = 1.0
 
 RATING_WORDS = {"One", "Two", "Three", "Four", "Five"}
 _last_network_request_at: float | None = None
+
+
+def log_structured(event: str, **fields) -> None:
+    payload = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "event": event,
+        **fields,
+    }
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 class FetchFailure(Exception):
@@ -66,9 +81,36 @@ def normalize_price_gbp(price_text: str | None) -> float:
     if not price_text:
         raise ValueError("Missing price_text")
     cleaned = re.sub(r"[^0-9.]", "", price_text)
-    if not cleaned:
+    if not cleaned or cleaned.count(".") > 1:
         raise ValueError(f"Cannot parse numeric GBP price from {price_text!r}")
-    return round(float(cleaned), 2)
+    value = round(float(cleaned), 2)
+    if value <= 0:
+        raise ValueError(f"Price must be positive, got {value}")
+    return value
+
+
+def resolve_book_url(page_url: str, relative_href: str) -> str:
+    return urljoin(page_url, relative_href)
+
+
+def compute_retry_wait(attempt: int, retry_after_header: str | None = None) -> float:
+    """Obey numeric Retry-After header when present; otherwise exponential backoff + jitter."""
+    if retry_after_header:
+        try:
+            parsed = float(retry_after_header.strip())
+            if parsed >= 0:
+                return min(parsed, 30.0)
+        except ValueError:
+            pass
+    jitter = random.uniform(0.05, 0.25)
+    return round((BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))) + jitter, 3)
+
+
+def should_retry_status(status_code: int) -> bool:
+    """Never retry 404 or 403; retry 429 Too Many Requests and 5xx server errors."""
+    if status_code in (403, 404):
+        return False
+    return status_code == 429 or (500 <= status_code < 600)
 
 
 def polite_wait() -> None:
@@ -85,8 +127,12 @@ def book_cache_path(product_url: str) -> Path:
     return BOOKS_CACHE_DIR / f"{slug}.html"
 
 
-def fetch_html(url: str, cache_path: Path) -> tuple[str, str, bool]:
-    """Fetch HTML with cache, timeout, and 1 retry on timeout/5xx (never retry 404 or 403)."""
+def fetch_html(
+    url: str,
+    cache_path: Path,
+    session: requests.Session | None = None,
+    max_attempts: int = MAX_RETRY_ATTEMPTS,
+) -> tuple[str, str, bool]:
     global _last_network_request_at
     if cache_path.exists():
         html = cache_path.read_text(encoding="utf-8")
@@ -94,11 +140,11 @@ def fetch_html(url: str, cache_path: Path) -> tuple[str, str, bool]:
         fetched_at = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
         return html, fetched_at, True
 
-    max_attempts = 2
+    http = session or requests
     for attempt in range(1, max_attempts + 1):
         polite_wait()
         try:
-            response = requests.get(
+            response = http.get(
                 url,
                 headers={"User-Agent": USER_AGENT},
                 timeout=TIMEOUT_SECONDS,
@@ -106,12 +152,15 @@ def fetch_html(url: str, cache_path: Path) -> tuple[str, str, bool]:
             _last_network_request_at = time.monotonic()
         except (requests.Timeout, requests.ConnectionError) as exc:
             _last_network_request_at = time.monotonic()
+            log_structured("fetch_network_error", url=url, status=None, attempt=attempt, error=str(exc))
             if attempt < max_attempts:
-                time.sleep(1.0)
+                time.sleep(compute_retry_wait(attempt))
                 continue
             raise FetchFailure(url, f"Network timeout/error after {attempt} attempts: {exc}") from exc
 
         status = response.status_code
+        log_structured("fetch_response", url=url, status=status, attempt=attempt, bytes=len(response.content))
+
         if status == 200:
             html = response.content.decode("utf-8")
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,18 +168,37 @@ def fetch_html(url: str, cache_path: Path) -> tuple[str, str, bool]:
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             return html, now_iso, False
 
-        # Never retry 404 (not found) or 403 (forbidden)
-        if status in (403, 404):
+        if not should_retry_status(status):
             raise FetchFailure(url, f"HTTP {status} (not retried)", status_code=status)
 
-        # Retry once on 5xx server error
-        if 500 <= status < 600 and attempt < max_attempts:
-            time.sleep(1.0)
+        if attempt < max_attempts:
+            wait_sec = compute_retry_wait(attempt, response.headers.get("Retry-After"))
+            log_structured("fetch_retry_wait", url=url, status=status, attempt=attempt, wait_seconds=wait_sec)
+            time.sleep(wait_sec)
             continue
 
-        raise FetchFailure(url, f"HTTP {status}", status_code=status)
+        raise FetchFailure(url, f"HTTP {status} after {attempt} attempts", status_code=status)
 
     raise FetchFailure(url, "Exhausted fetch attempts")
+
+
+def parse_catalogue_links(html: str, page_url: str) -> tuple[list[str], str | None]:
+    soup = BeautifulSoup(html, "html.parser")
+    book_urls = [
+        resolve_book_url(page_url, link["href"])
+        for link in soup.select("article.product_pod h3 a[href]")
+    ]
+    next_anchor = soup.select_one("li.next a[href]")
+    next_url = resolve_book_url(page_url, next_anchor["href"]) if next_anchor else None
+    return book_urls, next_url
+
+
+def deduplicate_urls(url_source_pairs: list[tuple[str, str]]) -> dict[str, str]:
+    unique: dict[str, str] = {}
+    for product_url, source_page in url_source_pairs:
+        if product_url not in unique:
+            unique[product_url] = source_page
+    return unique
 
 
 def discover_catalogue_books(
@@ -138,10 +206,9 @@ def discover_catalogue_books(
 ) -> tuple[int, int, dict[str, str], int, int]:
     current_url: str | None = start_url
     pages_visited = 0
-    discovered_total = 0
     pages_fetched = 0
     cache_hits = 0
-    unique_books: dict[str, str] = {}
+    discovered_pairs: list[tuple[str, str]] = []
 
     while current_url and pages_visited < max_pages:
         page_num = pages_visited + 1
@@ -153,17 +220,13 @@ def discover_catalogue_books(
             pages_fetched += 1
         pages_visited += 1
 
-        soup = BeautifulSoup(html, "html.parser")
-        for link in soup.select("article.product_pod h3 a[href]"):
-            abs_book_url = urljoin(current_url, link["href"])
-            discovered_total += 1
-            if abs_book_url not in unique_books:
-                unique_books[abs_book_url] = current_url
+        book_urls, next_url = parse_catalogue_links(html, current_url)
+        for u in book_urls:
+            discovered_pairs.append((u, current_url))
+        current_url = next_url
 
-        next_anchor = soup.select_one("li.next a[href]")
-        current_url = urljoin(current_url, next_anchor["href"]) if next_anchor else None
-
-    return pages_visited, discovered_total, unique_books, pages_fetched, cache_hits
+    unique_books = deduplicate_urls(discovered_pairs)
+    return pages_visited, len(discovered_pairs), unique_books, pages_fetched, cache_hits
 
 
 def extract_raw_book(html: str, product_url: str, source_page: str, fetched_at: str) -> dict:
@@ -190,14 +253,18 @@ def extract_raw_book(html: str, product_url: str, source_page: str, fetched_at: 
 
     desc_header = product.select_one("#product_description")
     desc_p = desc_header.find_next_sibling("p") if desc_header else None
-    raw_desc = desc_p.get_text(strip=True) if desc_p else ""
+    raw_desc = " ".join(desc_p.get_text().split()) if desc_p else ""
     description = raw_desc if raw_desc else None
 
+    title_clean = " ".join(title_el.get_text().split()) if title_el else None
+    price_clean = price_el.get_text(strip=True) if price_el else None
+    avail_clean = " ".join(avail_el.get_text().split()) if avail_el else None
+
     return {
-        "title": title_el.get_text(strip=True) if title_el else None,
+        "title": title_clean,
         "product_url": product_url,
-        "price_text": price_el.get_text(strip=True) if price_el else None,
-        "availability_text": " ".join(avail_el.get_text().split()) if avail_el else None,
+        "price_text": price_clean,
+        "availability_text": avail_clean,
         "rating_text": rating_text,
         "description": description,
         "source_page": source_page,
@@ -221,24 +288,127 @@ def normalize_and_validate(raw: dict) -> tuple[BookRecord | None, dict | None]:
         }
 
 
-def store_books_idempotently(records: list[BookRecord], books_path: Path) -> list[dict]:
-    existing_by_url: dict[str, dict] = {}
+def record_content_hash(item: dict) -> str:
+    """Hash core book facts (excluding fetched_at) to detect real content changes across runs."""
+    core = {
+        k: item.get(k)
+        for k in (
+            "title",
+            "product_url",
+            "price_text",
+            "price_gbp",
+            "availability_text",
+            "rating_text",
+            "description",
+        )
+    }
+    encoded = json.dumps(core, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def store_books_with_change_detection(
+    records: list[BookRecord], books_path: Path
+) -> tuple[list[dict], dict[str, int]]:
+    previous_by_url: dict[str, dict] = {}
     if books_path.exists():
         try:
             loaded = json.loads(books_path.read_text(encoding="utf-8"))
             for item in loaded:
                 if isinstance(item, dict) and "product_url" in item:
-                    existing_by_url[item["product_url"]] = item
+                    previous_by_url[item["product_url"]] = item
         except Exception:
             pass
 
+    current_by_url: dict[str, dict] = {}
     for rec in records:
-        existing_by_url[rec.product_url] = rec.model_dump(mode="json")
+        current_by_url[rec.product_url] = rec.model_dump(mode="json")
 
-    merged = list(existing_by_url.values())
+    new_count = 0
+    changed_count = 0
+    unchanged_count = 0
+    for url, curr in current_by_url.items():
+        prev = previous_by_url.get(url)
+        if prev is None:
+            new_count += 1
+        elif record_content_hash(prev) != record_content_hash(curr):
+            changed_count += 1
+        else:
+            unchanged_count += 1
+
+    gone_count = sum(1 for url in previous_by_url if url not in current_by_url)
+
+    merged_by_url = {**previous_by_url, **current_by_url}
+    merged = list(merged_by_url.values())
     books_path.parent.mkdir(parents=True, exist_ok=True)
     books_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-    return merged
+
+    changes = {
+        "new": new_count,
+        "changed": changed_count,
+        "unchanged": unchanged_count,
+        "gone": gone_count,
+    }
+    return merged, changes
+
+
+def export_books_csv(books: list[dict], csv_path: Path) -> None:
+    """Export validated books to CSV, flattening multiline/null descriptions into single-line strings."""
+    fieldnames = [
+        "title",
+        "product_url",
+        "price_text",
+        "price_gbp",
+        "availability_text",
+        "rating_text",
+        "description",
+        "source_page",
+        "fetched_at",
+    ]
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for b in books:
+            row = dict(b)
+            desc = row.get("description")
+            row["description"] = " ".join(str(desc).splitlines()) if desc is not None else ""
+            writer.writerow(row)
+
+
+def write_dashboard_html(books: list[dict], report: dict, html_path: Path) -> None:
+    prices = [b["price_gbp"] for b in books] or [0.0]
+    min_p, max_p = min(prices), max(prices)
+    avg_p = round(sum(prices) / len(prices), 2)
+    doc = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Polite Scraper — Run Dashboard</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; background: #0f172a; color: #e2e8f0; }}
+    h1 {{ color: #38bdf8; margin-bottom: 0.25rem; }}
+    .sub {{ color: #94a3b8; margin-bottom: 1.5rem; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; }}
+    .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1rem; }}
+    .label {{ font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; }}
+    .val {{ font-size: 1.6rem; font-weight: 700; margin-top: 0.25rem; color: #f8fafc; }}
+  </style>
+</head>
+<body>
+  <h1>The Polite Scraper — Observability Dashboard</h1>
+  <div class="sub">Last refreshed: {html_lib.escape(report["finished_at"])} · Duration: {report["duration_seconds"]}s</div>
+  <div class="grid">
+    <div class="card"><div class="label">Validated Records</div><div class="val">{report["valid_records"]}</div></div>
+    <div class="card"><div class="label">Price Range (GBP)</div><div class="val">£{min_p:.2f} – £{max_p:.2f}</div></div>
+    <div class="card"><div class="label">Average Price</div><div class="val">£{avg_p:.2f}</div></div>
+    <div class="card"><div class="label">Cache Hits / Fetched</div><div class="val">{report["cache_hits"]} / {report["pages_fetched"]}</div></div>
+    <div class="card"><div class="label">Failed Pages</div><div class="val">{report["failed_pages"]}</div></div>
+    <div class="card"><div class="label">Invalid Records</div><div class="val">{report["invalid_records"]}</div></div>
+  </div>
+</body>
+</html>
+"""
+    html_path.write_text(doc, encoding="utf-8")
 
 
 def main() -> None:
@@ -259,7 +429,7 @@ def main() -> None:
 
     work_items = list(unique_books.items())
     if not args.no_broken_url:
-        work_items.append((DELIBERATE_BROKEN_URL, "synthetic://fault-injection-test"))
+        work_items.append((DELIBERATE_BROKEN_URL, "https://books.toscrape.com/catalogue/page-1.html"))
 
     valid_records: list[BookRecord] = []
     error_records: list[dict] = []
@@ -282,7 +452,7 @@ def main() -> None:
             elif err is not None:
                 error_records.append(err)
         except FetchFailure as exc:
-            print(f"[SKIP BROKEN PAGE] {exc.url} -> {exc.reason}")
+            log_structured("page_skipped_fetch_failure", url=exc.url, status=exc.status_code, reason=exc.reason)
             failed_pages.append(
                 {
                     "url": exc.url,
@@ -291,16 +461,19 @@ def main() -> None:
                 }
             )
         except Exception as exc:
-            print(f"[SKIP UNEXPECTED ERROR] {product_url} -> {exc}")
+            log_structured("page_skipped_unexpected_error", url=product_url, status=None, reason=str(exc))
             failed_pages.append(
                 {"url": product_url, "status_code": None, "reason": str(exc)}
             )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    merged = store_books_idempotently(valid_records, OUTPUT_DIR / "books.json")
+    merged, changes = store_books_with_change_detection(
+        valid_records, OUTPUT_DIR / "books.json"
+    )
     (OUTPUT_DIR / "errors.json").write_text(
         json.dumps(error_records, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    export_books_csv(merged, OUTPUT_DIR / "books.csv")
 
     finished_dt = datetime.now(timezone.utc)
     duration_sec = round(time.perf_counter() - t0, 3)
@@ -317,16 +490,19 @@ def main() -> None:
         "valid_records": len(merged),
         "invalid_records": len(error_records),
         "failed_pages": len(failed_pages),
+        "changed_since_last_run": changes,
         "failures": failed_pages,
     }
     (OUTPUT_DIR / "run-report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    write_dashboard_html(merged, report, OUTPUT_DIR / "dashboard.html")
 
     print(
         f"catalogue_pages={cat_pages}, discovered={discovered_total}, "
         f"unique_urls={len(unique_books)}, valid_records={len(merged)}, "
-        f"failed_pages={len(failed_pages)}, cache_hits={cache_hits}"
+        f"failed_pages={len(failed_pages)}, cache_hits={cache_hits}, "
+        f"changes={changes}"
     )
 
 
