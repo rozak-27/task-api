@@ -193,10 +193,23 @@ def public_info():
     return {"message": "Welcome stranger! This info is public."}
 
 
-@app.get("/protected/profile", tags=["Protected"], summary="Read private profile data")
+@app.get("/protected/profile", tags=["Protected"], summary="Read verified user profile")
 def protected_profile(request: Request):
     token = extract_bearer_token(request)
-    return {"message": "Token received", "token_preview": f"{token[:12]}..."}
+    try:
+        user_response = supabase.auth.get_user(token)
+        if user_response is None or user_response.user is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        user = user_response.user
+        return {
+            "id": user.id,
+            "email": user.email,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
 
 # ==========================================
 # GENERAL & TASK CRUD ENDPOINTS
