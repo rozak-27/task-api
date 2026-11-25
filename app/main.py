@@ -2,9 +2,10 @@ import os
 
 import psycopg
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -17,7 +18,17 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 app = FastAPI(
     title="Task API",
     version="1.0.0",
-    description="A secure Task & Authentication API powered by FastAPI and Supabase Auth.",
+    description=(
+        "A secure API with Supabase Auth — sign up, log in, log out, "
+        "JWT verification via reusable dependency, and protected routes."
+    ),
+)
+
+bearer_scheme = HTTPBearer(
+    scheme_name="BearerAuth",
+    bearerFormat="JWT",
+    description="Paste your JWT access_token from POST /auth/login",
+    auto_error=False,
 )
 
 
@@ -84,7 +95,6 @@ def init_db():
         connection.commit()
         connection.close()
     except Exception:
-        # Allow standalone auth server startup when local Postgres container is stopped
         pass
 
 
@@ -107,6 +117,44 @@ class TaskUpdate(BaseModel):
 class AuthRequest(BaseModel):
     email: str | None = None
     password: str | None = None
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"email": "user@example.com", "password": "password123"}]
+        }
+    }
+
+
+# ==========================================
+# REUSABLE AUTH DEPENDENCY (GUARD)
+# ==========================================
+
+def extract_bearer_token(request: Request) -> str:
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Access token required")
+
+    parts = auth_header.split(" ")
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        raise HTTPException(status_code=401, detail="Access token required")
+
+    return parts[1].strip()
+
+
+def get_current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+):
+    token = extract_bearer_token(request)
+    try:
+        user_response = supabase.auth.get_user(token)
+        if user_response is None or user_response.user is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return user_response.user
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
+
 
 # ==========================================
 # AUTHENTICATION ENDPOINTS
@@ -116,7 +164,7 @@ class AuthRequest(BaseModel):
     "/auth/signup",
     status_code=201,
     tags=["Auth"],
-    summary="Register a new user account",
+    summary="Create a new user account",
 )
 def signup(auth: AuthRequest | None = None):
     if auth is None:
@@ -143,7 +191,7 @@ def signup(auth: AuthRequest | None = None):
     "/auth/login",
     status_code=200,
     tags=["Auth"],
-    summary="Authenticate user and return JWT tokens",
+    summary="Authenticate and return a JWT",
 )
 def login(auth: AuthRequest | None = None):
     if auth is None:
@@ -173,40 +221,11 @@ def login(auth: AuthRequest | None = None):
         raise HTTPException(status_code=401, detail="Invalid login credentials") from exc
 
 
-# ==========================================
-# REUSABLE AUTH DEPENDENCY (GUARD)
-# ==========================================
-
-def extract_bearer_token(request: Request) -> str:
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Access token required")
-
-    parts = auth_header.split(" ")
-    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
-        raise HTTPException(status_code=401, detail="Access token required")
-
-    return parts[1].strip()
-
-
-def get_current_user(request: Request):
-    token = extract_bearer_token(request)
-    try:
-        user_response = supabase.auth.get_user(token)
-        if user_response is None or user_response.user is None:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        return user_response.user
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
-
-
 @app.post(
     "/auth/logout",
     status_code=204,
     tags=["Auth"],
-    summary="End the current user session",
+    summary="End the user's session",
 )
 def logout(current_user=Depends(get_current_user)):
     try:
@@ -220,12 +239,12 @@ def logout(current_user=Depends(get_current_user)):
 # PUBLIC & PROTECTED ENDPOINTS
 # ==========================================
 
-@app.get("/public/info", tags=["Public"], summary="Read public open data")
+@app.get("/public/info", tags=["Public"], summary="Read public, open data")
 def public_info():
     return {"message": "Welcome stranger! This info is public."}
 
 
-@app.get("/protected/profile", tags=["Protected"], summary="Read verified user profile")
+@app.get("/protected/profile", tags=["Protected"], summary="Read private profile data")
 def protected_profile(current_user=Depends(get_current_user)):
     return {
         "id": current_user.id,
@@ -240,6 +259,7 @@ def protected_dashboard(current_user=Depends(get_current_user)):
         "message": f"Welcome to your dashboard, {current_user.email}!",
         "user_id": current_user.id,
     }
+
 
 # ==========================================
 # GENERAL & TASK CRUD ENDPOINTS
