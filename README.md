@@ -141,3 +141,27 @@ Access tokens are intentionally short-lived (1 hour by default in Supabase) to l
 
 ### 4. What's Inside a JWT & Stateless Logout
 Decoding a Supabase JWT payload (e.g., on `jwt.io`) reveals standard claims such as `sub` (user UUID), `email`, `role`, `iat` (issued at), and `exp` (expiration timestamp). Because the JWT header and payload are merely Base64URL-encoded (signed for integrity, **not** encrypted for secrecy), anyone holding the token can read its contents — so secrets must never be placed inside a JWT, and purely stateless JWT checks cannot instantly revoke an already-issued token without querying server-side session state (`supabase.auth.get_user(token)`).
+
+---
+
+## AI vs Me (Bonus Stage 7 — The AI Rematch)
+
+The quarantined AI-generated implementation lives in [`ai-version/`](./ai-version/) (`ai-version/main.py`), leaving the main submission in [`app/`](./app/) untouched.
+
+### My Prompt (Written From Scratch)
+
+> **Initial Prompt (v1):**
+> *"Build a single-file Python FastAPI backend that uses the official `supabase` Python SDK and `python-dotenv` (`SUPABASE_URL` and `SUPABASE_KEY` from `.env`) for JWT authentication. Implement five routes: `POST /auth/signup` (returns `201` with user data, or `400` if email/password is missing), `POST /auth/login` (returns `200` with `access_token` and `refresh_token`, `400` on empty input, `401` on bad credentials), `POST /auth/logout` (protected, calls `supabase.auth.sign_out()`, returns `204`), `GET /public/info` (unprotected, returns `200`), and `GET /protected/profile` + `GET /protected/dashboard` (protected via a single reusable FastAPI dependency that extracts the `Authorization: Bearer <token>` header, verifies it with `supabase.auth.get_user(token)`, returns `401` if missing/invalid, and returns `200` with user `id`, `email`, and `created_at`). Configure `HTTPBearer` so Swagger UI at `/docs` shows the Authorize padlock on protected routes."*
+
+### Code Review & Diff Analysis (`git diff --no-index app/main.py ai-version/main.py`)
+
+1. **How did it handle token extraction?**
+   In the first generation (`HTTPBearer()` with default `auto_error=True`), FastAPI/Starlette intercepted missing or non-Bearer `Authorization` headers *before* the dependency ran, returning `{"detail": "Not authenticated"}` (and `403` in older Starlette versions) instead of our required `401` with `{"error": "Access token required"}`. Even with `get_authorization_scheme_param`, `"Bearer token1 token2"` is split via `.partition(" ")` rather than rejecting extra spaces unless explicitly checked with `len(parts) == 2`.
+2. **What security or reliability flaws did the AI version introduce compared to `app/main.py`?**
+   - **No brute-force protection on `/auth/login`**: `ai-version/main.py` allows unlimited rapid password guesses, whereas `app/main.py` enforces a per-IP sliding window (`429 Too Many Requests` after 5 failed attempts).
+   - **Raw URL fragility**: `app/supabase_client.py` sanitizes accidental `/rest/v1` suffixes pasted from the Supabase dashboard (`raw_supabase_url.split("/rest/v1")[0]`), while `ai-version/main.py` only strips trailing slashes and would fail all GoTrue calls if given a REST endpoint URL.
+   - **No role-based authorization (`403`) or token refresh (`POST /auth/refresh`)**: It stopped at authentication (`401`) without separating authentication from admin authorization (`require_admin` → `403`).
+3. **What did my initial prompt forget to specify — and what did the AI silently decide?**
+   - My v1 prompt forgot to specify the **exact error JSON shape** (`{"error": "..."}` instead of FastAPI's default `{"detail": "..."}`), **how Pydantic missing-field validation errors should behave** (FastAPI defaults to `422 Unprocessable Entity` when required `str` fields are omitted), and **`HTTPBearer(auto_error=False)`**. The AI silently accepted FastAPI's built-in `422` / `{"detail": ...}` defaults.
+4. **One Rematch (What Changed):**
+   After tightening the prompt to explicitly require `HTTPBearer(auto_error=False)`, optional Pydantic fields + a `RequestValidationError` handler returning `400`, and uniform `{"error": "..."}` JSON responses, the regenerated [`ai-version/main.py`](./ai-version/main.py) cleanly passed every `400` / `401` / `200` / `204` checkpoint on the first run.
